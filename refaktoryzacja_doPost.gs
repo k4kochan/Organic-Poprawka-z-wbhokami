@@ -73,7 +73,7 @@ function pobierzIndeksyKolumn() {
 
 /* ========== PARSER WEBHOOKA ========== */
 function parsujWebhook(e) {
-  const d = JSON.parse([e.postData.contents]);
+  const d = JSON.parse(e.postData.contents);
 
   const couponLines = d.coupon_lines || [];
 
@@ -429,174 +429,255 @@ function ustawKoloryIZnaczenia(sh, kolory, checkboxy) {
   });
 }
 
-/* ========== GLOWNA FUNKCJA ========== */
-function doPost(e) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(20000); // zabezpieczenie współbieżności (kolejka do 20s)
+/* ========== WEBHOOK QUEUE (ACK + WORKER) ========== */
+const WEBHOOK_QUEUE_SHEET = 'WebhookQueue';
+const MAX_QUEUE_ATTEMPTS = 5;
 
+function _getOrCreateQueueSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(WEBHOOK_QUEUE_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(WEBHOOK_QUEUE_SHEET);
+    sh.appendRow([
+      'request_id', 'received_at', 'source_event', 'order_id',
+      'state', 'attempt_count', 'payload_json', 'last_error', 'processed_at'
+    ]);
+  }
+  return sh;
+}
+
+function _extractOrderId_(rawJson) {
   try {
-    // Indeksy kolumn i dostęp do bazy głównej
-    const { ss, sh, map, headerLen } = pobierzIndeksyKolumn();
+    return String(JSON.parse(rawJson).id || '');
+  } catch (e) {
+    return '';
+  }
+}
 
-    // >>> DELTA do zakładek – nagłówek bazy i bufor zmienionych wierszy
-    const headersAll = sh.getDataRange().getValues()[0];
-    const touchedRowsForDelta = [];
+function _enqueueWebhook_(requestId, sourceEvent, rawJson) {
+  const sh = _getOrCreateQueueSheet_();
+  sh.appendRow([
+    requestId, new Date(), sourceEvent || '', _extractOrderId_(rawJson),
+    'NEW', 0, rawJson, '', ''
+  ]);
+}
 
-    const kolory = [];
-    const checkboxy = [];
-
-    // Parsowanie payloadu i porządkowanie danych (bez podwójnego JSON.parse)
-    const { order, items, metaData } = parsujWebhook(e);
-    const zgodaNews = (metaData || []).some(md => md.key === 'newsletter_zgoda');
-
-
-
-    // Pomocnicze: budowa nazw produktu/wariantu
-    function resolveProductNames(item) {
-      const prod_name   = item.name;
-      const parent_name = item.parent_name;
-      const variant_val = item.meta_data && item.meta_data[0] ? item.meta_data[0].value : '';
-      let prod_nam = '', prod_nam_v = '';
-      if (prod_name === parent_name) {
-        prod_nam   = prod_name;
-        prod_nam_v = `${prod_name} - ${variant_val}`;
-      } else if (!parent_name) {
-        prod_nam   = prod_name;
-        prod_nam_v = prod_name;
-      } else {
-        prod_nam   = parent_name;
-        prod_nam_v = `${parent_name} - ${variant_val}`;
-      }
-      return { prod_nam, prod_nam_v };
+/* ========== GLOWNA FUNKCJA (SZYBKI ACK) ========== */
+function doPost(e) {
+  try {
+    const raw = e && e.postData && e.postData.contents ? String(e.postData.contents) : '';
+    if (!raw) {
+      logujBlad('doPost', 'Brak e.postData.contents');
+      return ContentService.createTextOutput('ERROR').setMimeType(ContentService.MimeType.TEXT);
     }
-    const colUID = headersAll.indexOf('UnikalnyID');
-    // Dla każdej pozycji zamówienia aktualizuj/dopisuj tylko to, co trzeba
-    items.forEach(item => {
-      const meta = parsujMetaDane(item);
-      meta.zgodaNews = zgodaNews;
 
-      const { prod_nam, prod_nam_v } = resolveProductNames(item);
+    const requestId = Utilities.getUuid();
+    const sourceEvent =
+      (e && e.parameter && (e.parameter.topic || e.parameter.event)) || 'woocommerce_webhook';
 
-      // Kwoty – zachowanie jak w Twojej logice (zadatek dodawany do linetotal; total zamówienia = oryginalny linetotal)
-      let linetotal = parseFloat(item.total || 0);
-      if (meta.placeZadatekFlag) {
-        order.total = linetotal;          // total zamówienia bez zadatku
-        linetotal  += meta.kwotaZadatku;  // wartość pozycji powiększona o zadatek
-      }
+    _enqueueWebhook_(requestId, sourceEvent, raw);
+    logujInfo('doPost', `ACK queued request_id=${requestId}`);
 
-      const qty = Math.max(1, parseInt(item.quantity, 10) || 1);
-      const perUnit    = linetotal / qty;
-      const perPerson  = meta.isCouple ? (perUnit / 2) : perUnit;
-
-      // Wszystkie istniejące wiersze w bazie dla "gołego" item.id
-      const allItemRows = znajdzWierszePoItemIdAll(sh, map, item.id);
-
-      // Funkcja pomocnicza: zapewnij odpowiednią liczbę wierszy dla danej roli+email
-      function ensureRowsFor(rola, osoba) {
-        const targetEmail = (osoba.email || order.billing.email || '').trim();
-
-        // Znajdź istniejące wiersze (ten sam item id + rola + email)
-        const exist = odfiltrujWgRoliIEmail(sh, map, allItemRows, rola, targetEmail);
-
-        // Zaktualizuj status/checkboxy/kolory w istniejących
-        aktualizujIstniejaceWiersze(
-          sh, map, exist, order.status,
-          perPerson, order.total, meta,
-          kolory, checkboxy
-        );
-
-        // DODAJ brakujące (tylko delta)
-        const need = qty;
-        const have = exist.length;
-        if (have < need) {
-          const toAdd = need - have;
-          const rowsToInsert = [];
-          for (let i = 0; i < toAdd; i++) {
-            const row = zbudujWierszOsoby({
-              osoba: { imie: osoba.imie, nazw: osoba.nazw, email: osoba.email, tel: osoba.tel },
-              rola,
-              linetotalPerRow: perPerson,
-              item, order, prod_nam, prod_nam_v,
-              metaDodatkowe: meta,
-              kol: {map, headerLen}
-            });
-            rowsToInsert.push(row);
-          }
-          if (rowsToInsert.length) {
-            dodajNoweWiersze(
-              sh, rowsToInsert, {map, headerLen},
-              kolory, checkboxy,
-              order.status, perPerson, order.total, meta
-            );
-          }
-        }
-      }
-
-      if (meta.isCouple) {
-        // Leader
-        ensureRowsFor('Leader', {
-          imie:  meta.imieL || meta.imieU || order.billing.first_name || '',
-          nazw:  meta.nazwiskoL || meta.nazwiskoU || order.billing.last_name || '',
-          email: meta.emailL || meta.emailU || order.billing.email || '',
-          tel:   meta.phoneL || meta.phoneU || order.billing.phone || ''
-        });
-        // Follower
-        ensureRowsFor('Follower', {
-          imie:  meta.imieF || '',
-          nazw:  meta.nazwiskoF || '',
-          email: meta.emailF || '',
-          tel:   meta.phoneF || ''
-        });
-      } else {
-        const rolaSolo =
-          (/leader/i.test(meta.rola) ? 'Leader' :
-           (/follower/i.test(meta.rola) ? 'Follower' : (meta.plec || meta.rola || '')));
-        ensureRowsFor(rolaSolo, {
-          imie:  meta.imieU || order.billing.first_name || '',
-          nazw:  meta.nazwiskoU || order.billing.last_name || '',
-          email: meta.emailU || order.billing.email || '',
-          tel:   meta.phoneU || order.billing.phone || ''
-        });
-      }
-
-      // >>> DELTA do zakładek: zbieraj TYLKO wiersze z nadanym UnikalnyID
-      (function collectTouchedRows(){
-        const allRowsNums = znajdzWierszePoItemIdAll(sh, map, item.id); // 2-indexed
-        if (!allRowsNums.length) return;
-        const width = headersAll.length;
-
-        allRowsNums.forEach(rn => {
-          const rowVals = sh.getRange(rn, 1, 1, width).getValues()[0];
-          // do delta-sync dorzucamy tylko te, które mają już UnikalnyID
-          if (colUID !== -1 && String(rowVals[colUID] || '').trim() !== '') {
-            touchedRowsForDelta.push(rowVals);
-          }
-        });
-      })();
-    });
-
-    // >>> DELTA do zakładek: jednorazowy hurtowy upsert tylko dotkniętych wierszy
-    _upsertRowsDelta_(touchedRowsForDelta, headersAll);
-
-    // Kolory i checkboxy w bazie (po wszystkich zmianach)
-    ustawKoloryIZnaczenia(sh, kolory, checkboxy);
-
-    // Usunięcie „(+30,00&nbsp;&#122;&#322;)” – kompatybilnie z Twoim kodem
-    sh.createTextFinder('(\\+30,00&nbsp;&#122;&#322;)')
-      .useRegularExpression(true)
-      .replaceAllWith(' ');
-
-    return ContentService
-      .createTextOutput('OK')
-      .setMimeType(ContentService.MimeType.TEXT);
-
+    return ContentService.createTextOutput('OK').setMimeType(ContentService.MimeType.TEXT);
   } catch (err) {
     logujBlad('doPost', err);
-    return ContentService
-      .createTextOutput('ERROR')
-      .setMimeType(ContentService.MimeType.TEXT);
+    return ContentService.createTextOutput('ERROR').setMimeType(ContentService.MimeType.TEXT);
+  }
+}
+
+function processWebhookQueueBatch(limit) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+
+  try {
+    const sh = _getOrCreateQueueSheet_();
+    const last = sh.getLastRow();
+    if (last < 2) return;
+
+    const rows = sh.getRange(2, 1, last - 1, 9).getValues();
+    const maxToProcess = Math.max(1, Number(limit || 10));
+    let processed = 0;
+
+    for (let i = 0; i < rows.length && processed < maxToProcess; i++) {
+      const rowNum = i + 2;
+      const requestId = String(rows[i][0] || '');
+      const state = String(rows[i][4] || '');
+      const attempts = Number(rows[i][5] || 0);
+      const payloadJson = String(rows[i][6] || '');
+
+      if (!payloadJson) continue;
+      if (!(state === 'NEW' || state === 'ERROR')) continue;
+      if (attempts >= MAX_QUEUE_ATTEMPTS) continue;
+
+      // mark PROCESSING + increment attempts
+      sh.getRange(rowNum, 5, 1, 2).setValues([['PROCESSING', attempts + 1]]);
+
+      try {
+        _processWebhookCore_({ postData: { contents: payloadJson } });
+        sh.getRange(rowNum, 5, 1, 5).setValues([['DONE', attempts + 1, payloadJson, '', new Date()]]);
+        logujInfo('processWebhookQueueBatch', `DONE request_id=${requestId}`);
+      } catch (err) {
+        const msg = err && err.stack ? err.stack : String(err);
+        sh.getRange(rowNum, 5, 1, 5).setValues([['ERROR', attempts + 1, payloadJson, msg, '']]);
+        logujBlad('processWebhookQueueBatch', `request_id=${requestId} :: ${msg}`);
+      }
+
+      processed++;
+    }
   } finally {
     lock.releaseLock();
   }
 }
 
+/* ========== CIĘŻKIE PRZETWARZANIE (worker) ========== */
+function _processWebhookCore_(e) {
+  // Indeksy kolumn i dostęp do bazy głównej
+  const { ss, sh, map, headerLen } = pobierzIndeksyKolumn();
+
+  // >>> DELTA do zakładek – nagłówek bazy i bufor zmienionych wierszy
+  const headersAll = sh.getDataRange().getValues()[0];
+  const touchedRowsForDelta = [];
+
+  const kolory = [];
+  const checkboxy = [];
+
+  // Parsowanie payloadu i porządkowanie danych (bez podwójnego JSON.parse)
+  const { order, items, metaData } = parsujWebhook(e);
+  const zgodaNews = (metaData || []).some(md => md.key === 'newsletter_zgoda');
+
+  // Pomocnicze: budowa nazw produktu/wariantu
+  function resolveProductNames(item) {
+    const prod_name = item.name;
+    const parent_name = item.parent_name;
+    const variant_val = item.meta_data && item.meta_data[0] ? item.meta_data[0].value : '';
+    let prod_nam = '', prod_nam_v = '';
+    if (prod_name === parent_name) {
+      prod_nam = prod_name;
+      prod_nam_v = `${prod_name} - ${variant_val}`;
+    } else if (!parent_name) {
+      prod_nam = prod_name;
+      prod_nam_v = prod_name;
+    } else {
+      prod_nam = parent_name;
+      prod_nam_v = `${parent_name} - ${variant_val}`;
+    }
+    return { prod_nam, prod_nam_v };
+  }
+  const colUID = headersAll.indexOf('UnikalnyID');
+
+  // Dla każdej pozycji zamówienia aktualizuj/dopisuj tylko to, co trzeba
+  items.forEach(item => {
+    const meta = parsujMetaDane(item);
+    meta.zgodaNews = zgodaNews;
+
+    const { prod_nam, prod_nam_v } = resolveProductNames(item);
+
+    // Kwoty – zachowanie jak w Twojej logice (zadatek dodawany do linetotal; total zamówienia = oryginalny linetotal)
+    let linetotal = parseFloat(item.total || 0);
+    if (meta.placeZadatekFlag) {
+      order.total = linetotal;          // total zamówienia bez zadatku
+      linetotal += meta.kwotaZadatku;   // wartość pozycji powiększona o zadatek
+    }
+
+    const qty = Math.max(1, parseInt(item.quantity, 10) || 1);
+    const perUnit = linetotal / qty;
+    const perPerson = meta.isCouple ? (perUnit / 2) : perUnit;
+
+    // Wszystkie istniejące wiersze w bazie dla "gołego" item.id
+    const allItemRows = znajdzWierszePoItemIdAll(sh, map, item.id);
+
+    // Funkcja pomocnicza: zapewnij odpowiednią liczbę wierszy dla danej roli+email
+    function ensureRowsFor(rola, osoba) {
+      const targetEmail = (osoba.email || order.billing.email || '').trim();
+
+      // Znajdź istniejące wiersze (ten sam item id + rola + email)
+      const exist = odfiltrujWgRoliIEmail(sh, map, allItemRows, rola, targetEmail);
+
+      // Zaktualizuj status/checkboxy/kolory w istniejących
+      aktualizujIstniejaceWiersze(
+        sh, map, exist, order.status,
+        perPerson, order.total, meta,
+        kolory, checkboxy
+      );
+
+      // DODAJ brakujące (tylko delta)
+      const need = qty;
+      const have = exist.length;
+      if (have < need) {
+        const toAdd = need - have;
+        const rowsToInsert = [];
+        for (let i = 0; i < toAdd; i++) {
+          const row = zbudujWierszOsoby({
+            osoba: { imie: osoba.imie, nazw: osoba.nazw, email: osoba.email, tel: osoba.tel },
+            rola,
+            linetotalPerRow: perPerson,
+            item, order, prod_nam, prod_nam_v,
+            metaDodatkowe: meta,
+            kol: { map, headerLen }
+          });
+          rowsToInsert.push(row);
+        }
+        if (rowsToInsert.length) {
+          dodajNoweWiersze(
+            sh, rowsToInsert, { map, headerLen },
+            kolory, checkboxy,
+            order.status, perPerson, order.total, meta
+          );
+        }
+      }
+    }
+
+    if (meta.isCouple) {
+      // Leader
+      ensureRowsFor('Leader', {
+        imie: meta.imieL || meta.imieU || order.billing.first_name || '',
+        nazw: meta.nazwiskoL || meta.nazwiskoU || order.billing.last_name || '',
+        email: meta.emailL || meta.emailU || order.billing.email || '',
+        tel: meta.phoneL || meta.phoneU || order.billing.phone || ''
+      });
+      // Follower
+      ensureRowsFor('Follower', {
+        imie: meta.imieF || '',
+        nazw: meta.nazwiskoF || '',
+        email: meta.emailF || '',
+        tel: meta.phoneF || ''
+      });
+    } else {
+      const rolaSolo =
+        (/leader/i.test(meta.rola) ? 'Leader' :
+          (/follower/i.test(meta.rola) ? 'Follower' : (meta.plec || meta.rola || '')));
+      ensureRowsFor(rolaSolo, {
+        imie: meta.imieU || order.billing.first_name || '',
+        nazw: meta.nazwiskoU || order.billing.last_name || '',
+        email: meta.emailU || order.billing.email || '',
+        tel: meta.phoneU || order.billing.phone || ''
+      });
+    }
+
+    // >>> DELTA do zakładek: zbieraj TYLKO wiersze z nadanym UnikalnyID
+    (function collectTouchedRows() {
+      const allRowsNums = znajdzWierszePoItemIdAll(sh, map, item.id); // 2-indexed
+      if (!allRowsNums.length) return;
+      const width = headersAll.length;
+
+      allRowsNums.forEach(rn => {
+        const rowVals = sh.getRange(rn, 1, 1, width).getValues()[0];
+        // do delta-sync dorzucamy tylko te, które mają już UnikalnyID
+        if (colUID !== -1 && String(rowVals[colUID] || '').trim() !== '') {
+          touchedRowsForDelta.push(rowVals);
+        }
+      });
+    })();
+  });
+
+  // >>> DELTA do zakładek: jednorazowy hurtowy upsert tylko dotkniętych wierszy
+  _upsertRowsDelta_(touchedRowsForDelta, headersAll);
+
+  // Kolory i checkboxy w bazie (po wszystkich zmianach)
+  ustawKoloryIZnaczenia(sh, kolory, checkboxy);
+
+  // Usunięcie „(+30,00&nbsp;&#122;&#322;)” – kompatybilnie z Twoim kodem
+  sh.createTextFinder('(\\+30,00&nbsp;&#122;&#322;)')
+    .useRegularExpression(true)
+    .replaceAllWith(' ');
+}
