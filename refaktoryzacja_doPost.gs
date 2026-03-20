@@ -506,7 +506,7 @@ function processWebhookQueueBatch(limit) {
       const payloadJson = String(rows[i][6] || '');
 
       if (!payloadJson) continue;
-      if (!(state === 'NEW' || state === 'ERROR')) continue;
+      if (!(state === 'NEW' || state === 'ERROR' || state === 'PROCESSING')) continue;
       if (attempts >= MAX_QUEUE_ATTEMPTS) continue;
 
       // mark PROCESSING + increment attempts
