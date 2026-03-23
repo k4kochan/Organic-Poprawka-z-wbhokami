@@ -8,6 +8,22 @@ var naglowki = caleDaneArkusza.shift(); //wyciety wiersz nagłówków
 function spr(n){Logger.log(n)} // skrócenie funkcji logera
 function index_col(nazwa_col){ return naglowki.indexOf(nazwa_col) }  // szukanie indeksu w tablicy po nazwie (główna baza)
 function dane_col_glowne(nazwaKolumnySzukanej){return nazwaKolumnySzukanej = caleDaneArkusza.map(e => e[index_col(nazwaKolumnySzukanej)])}
+function _dbgInfo(miejsce, wiad) {
+  try {
+    if (typeof logujInfo === 'function') logujInfo(miejsce, wiad);
+    else Logger.log(`[INFO] ${miejsce}: ${wiad}`);
+  } catch (e) {
+    Logger.log(`[INFO-FALLBACK] ${miejsce}: ${wiad}`);
+  }
+}
+function _dbgErr(miejsce, err) {
+  try {
+    if (typeof logujBlad === 'function') logujBlad(miejsce, err);
+    else Logger.log(`[BLAD] ${miejsce}: ${err}`);
+  } catch (e) {
+    Logger.log(`[BLAD-FALLBACK] ${miejsce}: ${err}`);
+  }
+}
 
 
 // deklaracja numerów kolumn (na bazie statycznego nagłówka z głównego arkusza)
@@ -68,14 +84,17 @@ var reguly = {
 
 // ======================= TRIGGER PRZY OTWARCIU (odchudzony) =======================
 function trigOnOpen() {
+  _dbgInfo('trigOnOpen', 'start');
   dodajMenu();                 // lekkie
   // ustaw_Kolor_i_blokowanie(); // opcjonalnie, lekkie
   
+  _dbgInfo('trigOnOpen', 'done');
 }
 
 
 // ======================= MENU =======================
 function dodajMenu() {
+  _dbgInfo('dodajMenu', 'start');
   SpreadsheetApp.getUi()
     .createMenu('Własne operacje')
     .addItem('Ustaw zamrożenia i formatowanie', 'ustaw_Kolor_i_blokowanie')
@@ -87,20 +106,26 @@ function dodajMenu() {
     .addItem('Utwórz CRON: sync co 6 h', 'utworzTriggerCo6h')
     .addItem('Usuń CRON: sync', 'usunTriggerySync')
     .addToUi();
+  _dbgInfo('dodajMenu', 'done');
 }
 
 
 // ======================= FORMATOWANIE / BLOKOWANIE =======================
 function ustaw_Kolor_i_blokowanie(){
+  _dbgInfo('ustaw_Kolor_i_blokowanie', 'start');
   ustawienieBlokowania();
   ustawFormatowanieWarunkowe(reguly);
+  _dbgInfo('ustaw_Kolor_i_blokowanie', 'done');
 }
 function ustawienieBlokowania() {
+  _dbgInfo('ustawienieBlokowania', 'start');
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   spreadsheet.setFrozenRows(1);
   spreadsheet.setFrozenColumns(3);
+  _dbgInfo('ustawienieBlokowania', 'done');
 }
 function ustawFormatowanieWarunkowe(reguly) {
+  _dbgInfo('ustawFormatowanieWarunkowe', 'start');
   var sht = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet(); 
   var wszystkieReguly = sht.getConditionalFormatRules();
   var istniejaceKryteria = [];
@@ -124,8 +149,10 @@ function ustawFormatowanieWarunkowe(reguly) {
     }
   }
   sht.setConditionalFormatRules(wszystkieReguly);
+  _dbgInfo('ustawFormatowanieWarunkowe', 'done');
 }
 function dodajRegulyDlaWiersza_i_Arkusza(numerWiersza, nazwaArkusza) {
+  _dbgInfo('dodajRegulyDlaWiersza_i_Arkusza', `start row=${numerWiersza} arkusz=${nazwaArkusza}`);
   var arkusz = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nazwaArkusza);
   var zakres1 = arkusz.getRange("L" + numerWiersza + ":L" + numerWiersza);
   var zakres2 = arkusz.getRange("Q" + numerWiersza + ":Q" + numerWiersza);
@@ -138,138 +165,13 @@ function dodajRegulyDlaWiersza_i_Arkusza(numerWiersza, nazwaArkusza) {
   zakres2.setDataValidation(regulaCheckboxa);
   zakres3.setDataValidation(regulaCheckboxa);
   zakres4.setDataValidation(regulaMenu);
-}
-
-// ======================= NARZĘDZIA FINANSOWE (jak u Ciebie) =======================
-function liczKontoGotowka(){
-  sprawdzCzyZaplaconeCaloscIkoloruj();
-  var ssA = SpreadsheetApp.getActive().getActiveSheet();
-  var daneAktArk = ssA.getDataRange().getValues();
-  daneAktArk.shift();
-  var rngA = ssA.getRange;
-  var lr = ssA.getLastRow();
-  var ui = SpreadsheetApp.getUi();
-  var result = ui.alert(
-    "Potrzebne do prawidłowego działania skryptu",
-    "Sprzwdź czy wszystke pola 'Wartość pozycji' i 'Nazwa produktu' są wypełnione?",
-    ui.ButtonSet.YES_NO)
-  if(result == ui.Button.YES){
-    var daneOn = rngA("O2:N"+lr).getValues();
-    var daneKto = rngA("I2:I"+lr).getValues();
-    var danePodzelonaWplata = rngA(2,col_podzielonaWplata+1,lr-1).getValues().flat();
-    var ind_got = []
-    var ind_kon =[]
-    var tylePowinnoByc = []
-    daneAktArk.forEach(function(wiersz,ind_wier){
-      if(wiersz[col_cenSpec] != "" && wiersz[col_status] != "refunded" && wiersz[col_status] != "cancelled" && wiersz[col_status] != "failed") {
-        tylePowinnoByc.push(wiersz[col_cenSpec])
-      } else if ( wiersz[col_status] != "refunded" && wiersz[col_status] != "cancelled" && wiersz[col_status] != "failed"){
-        tylePowinnoByc.push(wiersz[col_warPoz])
-      }
-    })
-    tylePowinnoByc =tylePowinnoByc.flat().map(n => n*1).reduce((a,b) => a+b);
-
-    daneKto.forEach((a,i) => { if(a != "") {ind_got.push(i)} else ind_kon.push(i) })
-
-    var daneGot =[];
-    var daneKon =[];
-    danePodzelonaWplata.forEach(function(wiersz_P,i){
-      if (wiersz_P == true) {rngA(i+2, col_podzielonaWplata+1).insertCheckboxes().setValue(true)}
-      else {rngA(i+2, col_podzielonaWplata+1).insertCheckboxes().setValue(false)}
-    })
-    ind_got.forEach(e => {
-      if(danePodzelonaWplata[e]== true){
-        daneKon.push(daneAktArk[e][col_zadatek])
-        daneGot.push(daneAktArk[e][col_drWpl])
-      } else {
-        daneGot.push(daneOn[e])
-      }
-    })
-    ind_kon.forEach(e => {
-      if(danePodzelonaWplata[e]== true){
-        daneKon.push(daneAktArk[e][col_zadatek])
-        daneGot.push(daneAktArk[e][col_drWpl])
-      } else {daneKon.push(daneOn[e])}
-    })
-
-    if(daneGot == false){ 
-      daneKon = daneKon.flat().map(n => n*1).reduce((a,b) => a+b);
-      ui.alert(`Nie ma wpłat gotówka, a na koncie jest równo: ${daneKon} Cebulionów :D\x0A Tyule brakuje: ${tylePowinnoByc-daneKon}PLN\x0A A tyle powinno być: ${tylePowinnoByc}PLN`);
-    }
-    if (daneKon == false){
-      daneGot = daneGot.flat().map(n => n*1).reduce((a,b) => a+b);
-      ui.alert(`Nie ma wpłat gotówka, a na koncie jest równo: ${daneGot} Cebulionów :D\x0A Tyule brakuje: ${tylePowinnoByc-daneGot}PLN\x0A A tyle powinno być: ${tylePowinnoByc}PLN`);
-    }
-    if(daneKon != false && daneGot != false){
-      daneKon = daneKon.flat().map(n => n*1).reduce((a,b) => a+b);
-      daneGot = daneGot.flat().map(n => n*1).reduce((a,b) => a+b);
-      var suma = daneKon+daneGot
-      var tylebrakuje = tylePowinnoByc-suma
-      ui.alert('Na koncie jest: '+daneKon + " PLN.\x0A Gotówki jest: "+daneGot + " PLN. \x0A W sumie:  "+suma+' Cebulionów :D\x0A\x0A Tyle powinno być: '+tylePowinnoByc+"\x0A A tyle brakuje: "+tylebrakuje);
-    }
-  }
-}
-function sprawdzCzyZaplaconeCaloscIkoloruj(){
-  var ssA = SpreadsheetApp.getActive().getActiveSheet();
-  var rngA = ssA.getRange;
-  var daneAktywnegoArkusza = ssA.getDataRange().getValues();
-  var naglowkiL = daneAktywnegoArkusza.shift();
-
-  function index_col_local(nazwa_col){ return naglowkiL.indexOf(nazwa_col) }
-  function dane_col(nazwaKolumnySzukanej){return nazwaKolumnySzukanej = daneAktywnegoArkusza.map(e => e[index_col_local(nazwaKolumnySzukanej)])}
-  function range_do_danychA(nazwaCol){return rngA(2,index_col_local(nazwaCol)+1,daneAktywnegoArkusza.length)}
-
-  rngA(2,col_podziekowanieZaCalosc+1,daneAktywnegoArkusza.length,6).insertCheckboxes()
-  range_do_danychA("Zapłacone całość").insertCheckboxes()
-
-  daneAktywnegoArkusza.forEach((wiersz,ind) => {
-    if(wiersz[col_cenSpec] == "" && wiersz[col_zadatek] + wiersz[col_drWpl] < wiersz[col_warPoz]) {
-      rngA(ind+2,col_zaplaconeCalosc+1).setValue(false);
-    }
-    if(wiersz[col_cenSpec] != "" && wiersz[col_zadatek] + wiersz[col_drWpl] < wiersz[col_cenSpec]){
-      rngA(ind+2,col_zaplaconeCalosc+1).setValue(false);
-    }
-    if(wiersz[col_status] == "cancelled" || wiersz[col_status] == "failed"){
-      rngA(ind+2,col_zaplaconeCalosc+1).setValue(false);
-    }
-    if( wiersz[col_status] == "completed" && wiersz[col_warPoz] <= wiersz[col_warZam]){ 
-      rngA(ind+2,col_zaplaconeCalosc+1).setValue(true)
-      rngA(ind+2,index_col_local("Zadatek")+1).setValue(wiersz[col_warPoz]);      
-    }
-    if( wiersz[col_status] == "completed" && wiersz[col_warPoz] >= wiersz[col_warZam] && wiersz[col_sposobPlatnosci]=="Przelewy24"){ 
-      rngA(ind+2,index_col_local("Zadatek")+1).setValue(wiersz[col_warZam]);      
-    }
-    if( wiersz[col_cenSpec] != "" && wiersz[col_zadatek] + wiersz[col_drWpl] >= wiersz[col_cenSpec]){
-      rngA(ind+2,col_zaplaconeCalosc+1).setValue(true);
-    }
-    else if(wiersz[col_warPoz] != "" && wiersz[col_zadatek] + wiersz[col_drWpl] >= wiersz[col_warPoz]){
-      rngA(ind+2,col_zaplaconeCalosc+1).setValue(true);
-    }
-  });
-
-  var daneTab_ZaplacCalo = dane_col("Zapłacone całość");
-  daneTab_ZaplacCalo.forEach((el,ind) => {
-    if(el == true){ 
-      rngA(ind+2,col_imie+1).setBackground(zielony_status);
-      rngA(ind+2,col_nazwisko+1).setBackground(zielony_status);
-      rngA(ind+2,col_podziekowanieZaCalosc,1,4).setBackground(jasnoZielony_mail);
-      rngA(ind+2,col_podziekowanieZaCalosc+4,1,2).setBackground(jasnoCzerwony_mail)
-    }
-    if(el == false){
-      rngA(ind+2,col_podziekowanieZaCalosc+2,1,4).setBackground(jasnoZielony_mail);
-      rngA(ind+2,col_podziekowanieZaCalosc,1,2).setBackground(jasnoCzerwony_mail);
-    }
-    if((daneAktywnegoArkusza[ind][col_status] == "cancelled" || daneAktywnegoArkusza[ind][col_status] == "failed") && el == false){
-      rngA(ind+2,col_imie+1).setBackground(mocnyCzerwony_status);
-      rngA(ind+2,col_nazwisko+1).setBackground(mocnyCzerwony_status);
-      rngA(ind+2,col_podziekowanieZaCalosc,1,6).setBackground(jasnoCzerwony_mail)
-    }
-  })
+  _dbgInfo('dodajRegulyDlaWiersza_i_Arkusza', `done row=${numerWiersza} arkusz=${nazwaArkusza}`);
 }
 
 // ======================= NOWE: helpery do sync/zakładek =======================
 
 function safeAlert(msg) {
+  _dbgInfo('safeAlert', `msg=${msg}`);
   try {
     SpreadsheetApp.getUi().alert(msg);
   } catch (e) {
@@ -286,6 +188,7 @@ function safeAlert(msg) {
  * NICZEGO więcej nie nadpisuje.
  */
 function _syncSheetFromBase_(sheetName){
+  _dbgInfo('_syncSheetFromBase_', `start sheet=${sheetName}`);
   if (sheetName === "Baza zamowien z organicflow") return;
 
   const baseSh = ss.getSheetByName("Baza zamowien z organicflow");
@@ -342,18 +245,22 @@ function _syncSheetFromBase_(sheetName){
     // Kolory spójne z bazą
     _kolorujBC_wZakladce_(prodSh, rowNum, b.status, b.zaplacone);
   }
+  _dbgInfo('_syncSheetFromBase_', `done sheet=${sheetName}`);
 }
 
 
 
 // ======================= NOWE: pełny upsert do zakładek + status sync =======================
 function addProductToLocalBase() {
+  _dbgInfo('addProductToLocalBase', 'start');
   syncUnsyncedRows();
   safeAlert("Zsynchronizowano rekordy z PUSTYM 'UnikalnyID' do odpowiednich zakładek.");
+  _dbgInfo('addProductToLocalBase', 'done');
 }
 
 
 function updateProductsInBase() {
+  _dbgInfo('updateProductsInBase', 'start');
   const active = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   const name = active.getSheetName();
   if (name === "Baza zamowien z organicflow"){
@@ -361,30 +268,36 @@ function updateProductsInBase() {
     return;
   }
   _syncSheetFromBase_(name); // selektywne odświeżenie
+  _dbgInfo('updateProductsInBase', `done sheet=${name}`);
 }
 
 
 // ======================= NOWE: CRON co 6h =======================
 function cronSyncZakladek(){
+  _dbgInfo('cronSyncZakladek', 'start');
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     syncUnsyncedRows(); // tylko niesynchro UID
   } catch (err) {
-    Logger.log(err);
+    _dbgErr('cronSyncZakladek', err);
   } finally {
     lock.releaseLock();
   }
+  _dbgInfo('cronSyncZakladek', 'done');
 }
 
 
 function utworzTriggerCo6h(){
+  _dbgInfo('utworzTriggerCo6h', 'start');
   usunTriggerySync();
   ScriptApp.newTrigger('cronSyncZakladek').timeBased().everyHours(6).create();
   safeAlert("Utworzono CRON: synchronizacja rekordów z pustym 'UnikalnyID' co 6 godzin.");
+  _dbgInfo('utworzTriggerCo6h', 'done');
 }
 
 function usunTriggerySync(){
+  _dbgInfo('usunTriggerySync', 'start');
   var all = ScriptApp.getProjectTriggers();
   all.forEach(function(t){
     var fn = t.getHandlerFunction();
@@ -392,6 +305,7 @@ function usunTriggerySync(){
       ScriptApp.deleteTrigger(t);
     }
   });
+  _dbgInfo('usunTriggerySync', 'done');
 }
 
 // ======================= (KONIEC helperów sync) =======================
@@ -400,6 +314,7 @@ function usunTriggerySync(){
 
 /** Utwórz zakładkę produktu jeśli nie istnieje (z nagłówkiem/formatem) */
 function _getOrCreateProductSheet_(name, headers) {
+  _dbgInfo('_getOrCreateProductSheet_', `sheet=${name}`);
   var sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
@@ -441,6 +356,7 @@ function _buildUidIndex(sh, colUID) {
  * - NIE aktualizujemy "Zgoda na newsletter".
  */
 function _upsertRowsDelta_(rows, headers) {
+  _dbgInfo('_upsertRowsDelta_', `start rows=${rows ? rows.length : 0}`);
   if (!rows || !rows.length) return;
 
   const colUID        = headers.indexOf('UnikalnyID');
@@ -512,6 +428,7 @@ function _upsertRowsDelta_(rows, headers) {
       }
     }
   }
+  _dbgInfo('_upsertRowsDelta_', `done products=${prodNames.length}`);
 }
 
 
@@ -544,6 +461,9 @@ function _kolorujBC_wZakladce_(sheet, rowNum, status, zaplaconeC) {
  * - po udanym wpisie nadaje nowy UID (max+1) w BAZIE i ZAKŁADCE.
  */
 function syncUnsyncedRows() {
+  _dbgInfo('syncUnsyncedRows', 'start');
+  const startedAt = Date.now();
+  const SYNC_UNSYNCED_MAX_MS = 170000; // ~2m50s bufor przed limitem Apps Script
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -579,7 +499,13 @@ function syncUnsyncedRows() {
     if (!toMove.length) return;
 
     // przenoszenie
-    toMove.forEach(it => {
+    for (let m = 0; m < toMove.length; m++) {
+      if (Date.now() - startedAt >= SYNC_UNSYNCED_MAX_MS) {
+        Logger.log(`syncUnsyncedRows STOP: timebox reached after ${m} rekordow.`);
+        break;
+      }
+
+      const it = toMove[m];
       const prodSh = _getOrCreateProductSheet_(it.productName, headers);
 
       prodSh.appendRow(it.values);
@@ -597,14 +523,14 @@ function syncUnsyncedRows() {
       const statusVal = it.values[colStatus];
       const zaplaconeVal = it.values[colZapCalosc];
       _kolorujBC_wZakladce_(prodSh, targetRow, statusVal, zaplaconeVal);
-    });
+    }
 
   } catch (err) {
-    Logger.log(err);
+    _dbgErr('syncUnsyncedRows', err);
     safeAlert("syncUnsyncedRows błąd: " + err);
 
   } finally {
     lock.releaseLock();
   }
+  _dbgInfo('syncUnsyncedRows', 'done');
 }
-
