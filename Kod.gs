@@ -544,6 +544,8 @@ function _kolorujBC_wZakladce_(sheet, rowNum, status, zaplaconeC) {
  * - po udanym wpisie nadaje nowy UID (max+1) w BAZIE i ZAKŁADCE.
  */
 function syncUnsyncedRows() {
+  const startedAt = Date.now();
+  const SYNC_UNSYNCED_MAX_MS = 170000; // ~2m50s bufor przed limitem Apps Script
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -579,7 +581,13 @@ function syncUnsyncedRows() {
     if (!toMove.length) return;
 
     // przenoszenie
-    toMove.forEach(it => {
+    for (let m = 0; m < toMove.length; m++) {
+      if (Date.now() - startedAt >= SYNC_UNSYNCED_MAX_MS) {
+        Logger.log(`syncUnsyncedRows STOP: timebox reached after ${m} rekordow.`);
+        break;
+      }
+
+      const it = toMove[m];
       const prodSh = _getOrCreateProductSheet_(it.productName, headers);
 
       prodSh.appendRow(it.values);
@@ -597,7 +605,7 @@ function syncUnsyncedRows() {
       const statusVal = it.values[colStatus];
       const zaplaconeVal = it.values[colZapCalosc];
       _kolorujBC_wZakladce_(prodSh, targetRow, statusVal, zaplaconeVal);
-    });
+    }
 
   } catch (err) {
     Logger.log(err);
@@ -607,4 +615,3 @@ function syncUnsyncedRows() {
     lock.releaseLock();
   }
 }
-
