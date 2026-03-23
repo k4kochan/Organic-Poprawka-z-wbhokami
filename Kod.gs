@@ -557,6 +557,7 @@ function syncUnsyncedRows() {
     const colProd  = headers.indexOf("Nazwa produktu");
     const colStatus    = headers.indexOf("Status zamówienia");
     const colZapCalosc = headers.indexOf("Zapłacone całość");
+    const colItemId    = headers.indexOf("item id");
     if ([colUID, colProd, colStatus, colZapCalosc].some(i => i === -1)) {
       throw new Error("Brak kluczowych kolumn (UnikalnyID/Nazwa produktu/Status/Zapłacone).");
     }
@@ -578,9 +579,62 @@ function syncUnsyncedRows() {
     }
     if (!toMove.length) return;
 
+    // dedupe cache per product sheet (unikamy duplikatów przy sync z pustym UID)
+    const dedupeCache = {};
+    function makeRowDedupeKey(row) {
+      // preferowany klucz: item id + cechy osoby
+      if (colItemId !== -1 && String(row[colItemId] || "").trim() !== "") {
+        const mail = String(row[headers.indexOf("E-mail")] || "").trim().toLowerCase();
+        const rola = String(row[headers.indexOf("Pan/Pani")] || "").trim().toLowerCase();
+        const imie = String(row[headers.indexOf("Imię")] || "").trim().toLowerCase();
+        const nazw = String(row[headers.indexOf("Nazwisko")] || "").trim().toLowerCase();
+        return `item:${String(row[colItemId]).trim()}|${mail}|${rola}|${imie}|${nazw}`;
+      }
+      // fallback: prawie cały wiersz poza UID
+      return row.map((v, idx) => idx === colUID ? "" : String(v || "").trim()).join("||");
+    }
+
+    function getSheetDedupeIndex(prodSh) {
+      const sheetName = prodSh.getSheetName();
+      if (dedupeCache[sheetName]) return dedupeCache[sheetName];
+
+      const idx = {};
+      const lr = prodSh.getLastRow();
+      if (lr > 1) {
+        const data = prodSh.getRange(2, 1, lr - 1, headers.length).getValues();
+        data.forEach((r, i) => {
+          const key = makeRowDedupeKey(r);
+          if (!idx[key]) {
+            idx[key] = {
+              rowNum: i + 2,
+              uid: r[colUID]
+            };
+          }
+        });
+      }
+      dedupeCache[sheetName] = idx;
+      return idx;
+    }
+
     // przenoszenie
     toMove.forEach(it => {
       const prodSh = _getOrCreateProductSheet_(it.productName, headers);
+      const idx = getSheetDedupeIndex(prodSh);
+      const key = makeRowDedupeKey(it.values);
+
+      // DUPLIKAT: nie dodawaj nowego wiersza; jeśli baza nie ma UID, odziedzicz UID z zakładki
+      if (idx[key]) {
+        const dupUID = Number(idx[key].uid);
+        if (!isNaN(dupUID) && dupUID > 0) {
+          baseSh.getRange(it.baseRowNum, colUID + 1).setValue(dupUID);
+        } else {
+          maxUID += 1;
+          baseSh.getRange(it.baseRowNum, colUID + 1).setValue(maxUID);
+          prodSh.getRange(idx[key].rowNum, colUID + 1).setValue(maxUID);
+          idx[key].uid = maxUID;
+        }
+        return;
+      }
 
       prodSh.appendRow(it.values);
       const targetRow = prodSh.getLastRow();
@@ -597,6 +651,9 @@ function syncUnsyncedRows() {
       const statusVal = it.values[colStatus];
       const zaplaconeVal = it.values[colZapCalosc];
       _kolorujBC_wZakladce_(prodSh, targetRow, statusVal, zaplaconeVal);
+
+      // aktualizuj indeks dedupe po udanym insercie
+      idx[key] = { rowNum: targetRow, uid: maxUID };
     });
 
   } catch (err) {
@@ -607,4 +664,3 @@ function syncUnsyncedRows() {
     lock.releaseLock();
   }
 }
-
