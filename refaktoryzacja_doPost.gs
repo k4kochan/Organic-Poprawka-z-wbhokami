@@ -432,6 +432,7 @@ function ustawKoloryIZnaczenia(sh, kolory, checkboxy) {
 /* ========== WEBHOOK QUEUE (ACK + WORKER) ========== */
 const WEBHOOK_QUEUE_SHEET = 'WebhookQueue';
 const MAX_QUEUE_ATTEMPTS = 5;
+const WEBHOOK_BATCH_MAX_MS = 170000; // ~2m50s bufor przed limitem 6 min Apps Script
 
 function _getOrCreateQueueSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -496,9 +497,15 @@ function processWebhookQueueBatch(limit) {
 
     const rows = sh.getRange(2, 1, last - 1, 9).getValues();
     const maxToProcess = Math.max(1, Number(limit || 10));
+    const startedAt = Date.now();
     let processed = 0;
 
     for (let i = 0; i < rows.length && processed < maxToProcess; i++) {
+      if (Date.now() - startedAt >= WEBHOOK_BATCH_MAX_MS) {
+        logujInfo('processWebhookQueueBatch', `STOP timebox reached after ${processed} rekordow`);
+        break;
+      }
+
       const rowNum = i + 2;
       const requestId = String(rows[i][0] || '');
       const state = String(rows[i][4] || '');
